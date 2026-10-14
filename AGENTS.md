@@ -66,6 +66,32 @@ This is a distributable Python framework managed with `uv`.
 - When dependencies change, regenerate `uv.lock` with `uv lock` and commit it.
   Build artifacts, virtual environments, reports, and caches remain untracked.
 
+## Commit conventions
+
+Use Conventional Commit-style subjects:
+
+```text
+<type>(optional-scope): imperative summary
+```
+
+Use one atomic purpose per commit and choose the most specific type:
+
+- `feat`: user-visible functionality.
+- `fix`: a non-urgent defect correction.
+- `hotfix`: an urgent production-critical correction.
+- `docs`: documentation only.
+- `test`: tests only.
+- `refactor`: code restructuring with no behavior change.
+- `perf`: measurable performance improvement.
+- `build`: packaging, dependencies, or build tooling.
+- `ci`: continuous-integration configuration.
+- `chore`: maintenance that fits none of the types above.
+
+Keep the summary concise and imperative, for example
+`feat(storage): add SQLite transition history`. Use `!` or a `BREAKING CHANGE:`
+footer whenever a commit introduces an incompatible public API change. Do not
+use ambiguous subjects such as `update`, `changes`, or `wip`.
+
 ## Required gates
 
 Before declaring any change complete, run the following commands from the
