@@ -53,6 +53,8 @@ not add an adapter merely to make the architecture appear extensible.
 
 This is a distributable Python framework managed with `uv`.
 
+- Write all repository content, commit messages, pull requests, code comments,
+  documentation, and user-facing errors in English.
 - Production code lives in `src/fastlifecycle/`; tests live in `tests/`.
 - Keep the public API deliberate: export only supported names from
   `src/fastlifecycle/__init__.py` and document changes in the README.
