@@ -14,7 +14,7 @@ documentation, and progressive adoption in existing Python applications.
 ## Project status
 
 FastLifecycle 0.1.0 provides the SQLite/local MVP: typed entities,
-decorator-based transitions, guards and invariants, explicit SQLite schema
+public triggers with resolved outcomes, guards and invariants, explicit SQLite schema
 migrations, optimistic versions, append-only transition history, and command
 idempotency. PostgreSQL, background workers, jobs, retries, outbox delivery,
 and recovery of external effects are not part of this release.
@@ -37,7 +37,7 @@ pending ──confirm_payment──▶ paid ──begin_fulfillment──▶ ful
    └──────────────────────────── cancel ───────────────────────────▶ cancelled
 ```
 
-The entity lifecycle can contain cycles. Transition-derived job DAGs are a
+The entity lifecycle can contain cycles. Trigger-derived job DAGs are a
 separate future concern; the MVP does not create or deliver jobs.
 
 ## Quickstart
@@ -54,7 +54,9 @@ from fastlifecycle import (
     FastLifecycle,
     LocalExecution,
     SQLiteStorage,
-    transition,
+    stay,
+    transition_to,
+    trigger,
 )
 
 
@@ -70,9 +72,16 @@ class Order(Entity):
     state: OrderState = OrderState.PENDING
     payment_id: str | None = None
 
-    @transition(source=OrderState.PENDING, target=OrderState.PAID)
-    async def confirm_payment(self, payment_id: str) -> None:
-        self.payment_id = payment_id
+    @trigger(from_states=[OrderState.PENDING])
+    async def receive_payment_message(self, approved: bool, payment_id: str):
+        if approved:
+            self.payment_id = payment_id
+            return transition_to(
+                OrderState.PAID,
+                outcome="payment_approved",
+                result={"payment_id": payment_id},
+            )
+        return stay(outcome="payment_pending")
 
 
 # Apply framework-owned DDL before the application accepts lifecycle work.
@@ -80,27 +89,36 @@ storage = SQLiteStorage("fastlifecycle.db")
 storage.migrate()
 lifecycle = FastLifecycle(storage, LocalExecution())
 
-result = await lifecycle.execute(
-    Order.confirm_payment,
+result = await lifecycle.dispatch(
+    Order.receive_payment_message,
     entity_id="order-123",
-    idempotency_key="confirm-payment-123",
+    idempotency_key="provider-message-456",
+    approved=True,
     payment_id="pay-456",
 )
 ```
 
-`result` includes the committed entity version and the transition return value.
+`result` includes the committed entity version, trigger outcome, resolved state
+change, and handler result.
 `lifecycle.get(Order, "order-123")` returns the latest entity and its version;
 `lifecycle.history(Order, "order-123")` returns append-only committed records.
 
-The local executor awaits the transition method, then persists the successful
+The local executor awaits the trigger handler, then persists the successful
 state change in a short SQLite transaction. External effects inside a
-transition are therefore not part of that transaction and must be designed for
+trigger are therefore not part of that transaction and must be designed for
 retries by the application. The MVP provides no durable background execution.
 
-### Guards and invariants
+### Triggers, decisions, guards, and invariants
+
+Triggers are the public, registrable lifecycle contracts. A trigger may be
+accepted from declared `from_states`, but its handler decides the outcome with
+`transition_to(target, outcome=...)` or `stay(outcome=...)`. A `stay` decision
+is persisted and versioned like any other accepted trigger. Directly assigning
+to `state` inside a handler is rejected: the declared decision is the only way
+to change state.
 
 Pass guards by method name or callable. Mark a zero-argument instance method
-with `@invariant`; every invariant runs after the transition target state is
+with `@invariant`; every invariant runs after the resolved target state is
 applied and before anything is committed. A failed input check, guard, or
 invariant produces a descriptive exception and creates no successful entity,
 history, or command record.
@@ -129,10 +147,10 @@ credentials if a connection-like setting must be reported.
 For one successful command, FastLifecycle atomically records the entity
 snapshot and version, the append-only history record, and—when supplied—the
 idempotency command/result in one SQLite transaction. A key is scoped to an
-entity type and entity ID. Repeating the same transition with identical inputs
+entity type and entity ID. Repeating the same trigger with identical inputs
 returns the original result with `duplicate=True`; reusing the key for another
-transition or inputs is rejected. A conflicting entity version raises
-`ConcurrentTransitionError`.
+trigger or inputs is rejected. A conflicting entity version raises
+`ConcurrentTriggerError`.
 
 All records are regular `fastlifecycle_*` SQLite tables, so they remain
 queryable with ordinary SQL. SQLite is intended for a single local application
@@ -148,16 +166,16 @@ exactly-once, or durable external-effect claim.
 - **Explicit boundaries.** Successful local state changes are atomic in
   SQLite; durable background delivery and external-effect recovery are not yet
   provided.
-- **Transactional transitions.** A state change, its audit record, and its
-  derived pending jobs should be persisted atomically, using a transactional
-  outbox where applicable.
+- **Transactional trigger acceptance.** A resolved state change, its audit
+  record, and its command result are persisted atomically.
 - **DX-first and typed.** Type hints, decorators, validation, documentation,
   and error messages should make the safe path the easy path.
 - **Progressive disclosure.** The local path should require minimal
   configuration; workers, storage adapters, telemetry, and advanced controls
   should appear only when needed.
 - **Observable by default.** A user can inspect an entity's state and its
-  committed transition history, inputs, and outputs with SQL or the read API.
+  committed trigger history, outcomes, inputs, and outputs with SQL or the
+  read API.
 - **Explicit guarantees.** Terms such as exactly-once, at-least-once,
   idempotent, and transactional must always state their scope and limits.
 

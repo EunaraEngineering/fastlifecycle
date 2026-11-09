@@ -1,53 +1,61 @@
 """Public API for the SQLite/local FastLifecycle MVP."""
 
-from .application import ExecutionResult, FastLifecycle, HistoryRecord
+from .application import DispatchResult, FastLifecycle, HistoryRecord
 from .configuration import lifecycle_from_environment, redact
 from .domain import (
-    ConcurrentTransitionError,
+    ConcurrentTriggerError,
     ConfigurationError,
     Entity,
     FastLifecycleError,
     GuardRejectedError,
     IdempotencyConflictError,
     InvalidStateError,
+    InvalidTriggerDecisionError,
     InvariantError,
     SchemaNotReadyError,
-    Transition,
-    TransitionError,
-    TransitionInputError,
+    Trigger,
+    TriggerDecision,
+    TriggerError,
+    TriggerInputError,
     UnsupportedSchemaError,
     invariant,
-    transition,
+    stay,
+    transition_to,
+    trigger,
 )
 from .execution import LocalExecution
 from .persistence import SCHEMA_VERSION, SQLiteSettings, SQLiteStorage
 
 __all__ = (
     "SCHEMA_VERSION",
-    "ConcurrentTransitionError",
+    "ConcurrentTriggerError",
     "ConfigurationError",
+    "DispatchResult",
     "Entity",
-    "ExecutionResult",
     "FastLifecycle",
     "FastLifecycleError",
     "GuardRejectedError",
     "HistoryRecord",
     "IdempotencyConflictError",
     "InvalidStateError",
+    "InvalidTriggerDecisionError",
     "InvariantError",
     "LocalExecution",
     "SQLiteSettings",
     "SQLiteStorage",
     "SchemaNotReadyError",
-    "Transition",
-    "TransitionError",
-    "TransitionInputError",
+    "Trigger",
+    "TriggerDecision",
+    "TriggerError",
+    "TriggerInputError",
     "UnsupportedSchemaError",
     "__version__",
     "invariant",
     "lifecycle_from_environment",
     "redact",
-    "transition",
+    "stay",
+    "transition_to",
+    "trigger",
 )
 
 __version__ = "0.1.0"

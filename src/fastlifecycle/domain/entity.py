@@ -1,10 +1,11 @@
-"""Typed entity primitives and lifecycle validation decorators."""
+"""Typed entity primitives and trigger-driven lifecycle validation."""
 
 from __future__ import annotations
 
 import inspect
 import types
 from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
 from enum import Enum
 from typing import (
     Any,
@@ -18,11 +19,37 @@ from typing import (
     overload,
 )
 
-from .errors import GuardRejectedError, InvariantError, TransitionInputError
+from .errors import GuardRejectedError, InvariantError, TriggerInputError
 
 Guard = Callable[..., bool | Awaitable[bool]]
 Invariant = Callable[..., bool | Awaitable[bool]]
 EntityType = TypeVar("EntityType", bound="Entity")
+
+
+@dataclass(frozen=True, slots=True)
+class TriggerDecision:
+    """The explicit business outcome produced by one accepted trigger."""
+
+    outcome: str
+    result: Any = None
+    target_state: object | None = None
+
+    @property
+    def state_changed(self) -> bool:
+        """Whether the decision requests a state change."""
+        return self.target_state is not None
+
+
+def transition_to(
+    target_state: object, *, outcome: str, result: Any = None
+) -> TriggerDecision:
+    """Return a decision that moves the entity to ``target_state``."""
+    return TriggerDecision(outcome=outcome, result=result, target_state=target_state)
+
+
+def stay(*, outcome: str, result: Any = None) -> TriggerDecision:
+    """Return an accepted trigger decision that leaves the state unchanged."""
+    return TriggerDecision(outcome=outcome, result=result)
 
 
 def _type_name(annotation: object) -> str:
@@ -30,7 +57,7 @@ def _type_name(annotation: object) -> str:
 
 
 def _matches_type(value: object, annotation: object) -> bool:
-    """Provide pragmatic runtime checks for transition input annotations."""
+    """Provide pragmatic runtime checks for trigger input annotations."""
     if annotation is Any or annotation is inspect.Signature.empty:
         return True
     if annotation is None or annotation is type(None):
@@ -87,16 +114,14 @@ def _coerce(value: object, annotation: object) -> object:
 
 
 class Entity:
-    """Base class for persistent lifecycle entities.
-
-    Public fields are declared as normal class annotations with optional class
-    defaults.  The ``state`` field is required on every concrete entity.
-    """
+    """Base class for persistent lifecycle entities."""
 
     _entity_id: str | None
 
     def __init__(self, **values: object) -> None:
         fields = _field_annotations(type(self))
+        if "state" not in fields:
+            raise TypeError(f"{type(self).__name__} must declare a state field.")
         unknown = set(values).difference(fields)
         if unknown:
             names = ", ".join(sorted(unknown))
@@ -138,30 +163,30 @@ class Entity:
 
     @property
     def entity_id(self) -> str | None:
-        """Identifier attached by a lifecycle execution or lookup."""
+        """Identifier attached by a lifecycle dispatch or lookup."""
         return self._entity_id
 
 
-class Transition:
-    """Descriptor carrying a transition's declared source, target, and guards."""
+class Trigger:
+    """A public lifecycle contract whose handler resolves its outcome."""
 
     def __init__(
         self,
         function: Callable[..., object],
         *,
-        source: object | Iterable[object],
-        target: object,
+        from_states: object | Iterable[object] | None = None,
         guards: Iterable[Guard | str] = (),
     ) -> None:
         self.function = function
         self.name = function.__name__
         self.sources = (
-            tuple(source)
-            if isinstance(source, Iterable)
-            and not isinstance(source, (str, bytes, Enum))
-            else (source,)
+            ()
+            if from_states is None
+            else tuple(from_states)
+            if isinstance(from_states, Iterable)
+            and not isinstance(from_states, (str, bytes, Enum))
+            else (from_states,)
         )
-        self.target = target
         self.guards = tuple(guards)
         self.owner: type[Entity] | None = None
         self.signature = inspect.signature(function)
@@ -172,7 +197,7 @@ class Transition:
         self.name = name
 
     @overload
-    def __get__(self, instance: None, owner: type[Entity]) -> Transition: ...
+    def __get__(self, instance: None, owner: type[Entity]) -> Trigger: ...
 
     @overload
     def __get__(
@@ -181,7 +206,7 @@ class Transition:
 
     def __get__(
         self, instance: Entity | None, owner: type[Entity]
-    ) -> Transition | Callable[..., object]:
+    ) -> Trigger | Callable[..., object]:
         if instance is None:
             return self
         return cast(Callable[..., object], self.function.__get__(instance, owner))
@@ -190,8 +215,8 @@ class Transition:
         try:
             bound = self.signature.bind(None, **values)
         except TypeError as error:
-            raise TransitionInputError(
-                f"Invalid input for transition {self.name!r}: {error}"
+            raise TriggerInputError(
+                f"Invalid input for trigger {self.name!r}: {error}"
             ) from error
         for name, value in bound.arguments.items():
             if name == "self":
@@ -200,28 +225,41 @@ class Transition:
                 name, self.signature.parameters[name].annotation
             )
             if not _matches_type(value, annotation):
-                raise TransitionInputError(
-                    f"Invalid input {name!r} for transition {self.name!r}: expected "
+                raise TriggerInputError(
+                    f"Invalid input {name!r} for trigger {self.name!r}: expected "
                     f"{_type_name(annotation)}, got {type(value).__name__}."
                 )
 
 
-def transition(
+@overload
+def trigger(function: Callable[..., object]) -> Trigger: ...
+
+
+@overload
+def trigger(
     *,
-    source: object | Iterable[object],
-    target: object,
+    from_states: object | Iterable[object] | None = None,
     guards: Iterable[Guard | str] = (),
-) -> Callable[[Callable[..., object]], Transition]:
-    """Declare a state transition on an :class:`Entity` method."""
+) -> Callable[[Callable[..., object]], Trigger]:
+    """Declare a publicly dispatchable lifecycle trigger."""
 
-    def decorate(function: Callable[..., object]) -> Transition:
-        return Transition(function, source=source, target=target, guards=guards)
 
-    return decorate
+def trigger(
+    function: Callable[..., object] | None = None,
+    *,
+    from_states: object | Iterable[object] | None = None,
+    guards: Iterable[Guard | str] = (),
+) -> Trigger | Callable[[Callable[..., object]], Trigger]:
+    """Declare a publicly dispatchable lifecycle trigger."""
+
+    def decorate(decorated: Callable[..., object]) -> Trigger:
+        return Trigger(decorated, from_states=from_states, guards=guards)
+
+    return decorate if function is None else decorate(function)
 
 
 def invariant(function: Invariant) -> Invariant:
-    """Mark an entity method as an invariant checked after every transition."""
+    """Mark an entity method as an invariant checked after every trigger."""
     function.__dict__["__fastlifecycle_invariant__"] = True
     return function
 
@@ -242,24 +280,24 @@ async def call_validation(callback: Guard | Invariant, entity: Entity) -> bool:
     return bool(value)
 
 
-async def validate_guards(entity: Entity, transition_def: Transition) -> None:
-    for guard in transition_def.guards:
+async def validate_guards(entity: Entity, trigger_def: Trigger) -> None:
+    for guard in trigger_def.guards:
         callback = getattr(entity, guard) if isinstance(guard, str) else guard
         if not await call_validation(callback, entity):
             raise GuardRejectedError(
-                f"Guard rejected transition {transition_def.name!r} for "
+                f"Guard rejected trigger {trigger_def.name!r} for "
                 f"{type(entity).__name__} {entity.entity_id!r}."
             )
 
 
-async def validate_invariants(entity: Entity, transition_def: Transition) -> None:
+async def validate_invariants(entity: Entity, trigger_def: Trigger) -> None:
     for base in type(entity).__mro__:
         for callback in vars(base).values():
             if getattr(callback, "__fastlifecycle_invariant__", False):
                 bound = callback.__get__(entity, type(entity))
                 if not await call_validation(bound, entity):
                     raise InvariantError(
-                        f"Invariant {callback.__name__!r} failed after transition "
-                        f"{transition_def.name!r} for {type(entity).__name__} "
+                        f"Invariant {callback.__name__!r} failed after trigger "
+                        f"{trigger_def.name!r} for {type(entity).__name__} "
                         f"{entity.entity_id!r}."
                     )

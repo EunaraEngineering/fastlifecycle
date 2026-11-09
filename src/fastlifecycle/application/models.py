@@ -10,12 +10,16 @@ from fastlifecycle.domain.entity import Entity
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionResult:
-    """The canonical result of an accepted transition command."""
+class DispatchResult:
+    """The canonical result of an accepted trigger dispatch."""
 
     entity_id: str
     entity_type: str
-    transition: str
+    trigger: str
+    outcome: str
+    source_state: Any
+    target_state: Any
+    state_changed: bool
     version: int
     result: Any
     duplicate: bool = False
@@ -23,14 +27,16 @@ class ExecutionResult:
 
 @dataclass(frozen=True, slots=True)
 class HistoryRecord:
-    """An append-only record of one successfully committed transition."""
+    """An append-only record of one successfully committed trigger."""
 
     id: int
     entity_id: str
     entity_type: str
-    transition: str
+    trigger: str
+    outcome: str
     source_state: Any
     target_state: Any
+    state_changed: bool
     version: int
     inputs: dict[str, Any]
     result: Any
@@ -49,11 +55,15 @@ class StoredEntity:
 
 @dataclass(frozen=True, slots=True)
 class StoredCommand:
-    """Persistence-neutral accepted command result."""
+    """Persistence-neutral accepted trigger result."""
 
     entity_id: str
     entity_type: str
-    transition: str
+    trigger: str
+    outcome: str
+    source_state: Any
+    target_state: Any
+    state_changed: bool
     version: int
     result: Any
     duplicate: bool

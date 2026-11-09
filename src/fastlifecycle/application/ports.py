@@ -23,33 +23,35 @@ class Storage(Protocol):
         entity_type: str,
         entity_id: str,
         idempotency_key: str | None,
-        transition: str,
+        trigger: str,
         inputs: dict[str, Any],
     ) -> StoredCommand | None:
-        """Find a canonical idempotent result before transition code is run."""
+        """Find a canonical idempotent result before trigger code is run."""
 
     def commit(
         self,
         *,
         entity_type: str,
         entity_id: str,
-        transition: str,
-        expected_version: int,
+        trigger: str,
+        outcome: str,
         source_state: Any,
         target_state: Any,
+        state_changed: bool,
+        expected_version: int,
         entity_values: dict[str, Any],
         inputs: dict[str, Any],
         result: Any,
         idempotency_key: str | None,
     ) -> StoredCommand:
-        """Atomically persist one accepted transition or return its duplicate."""
+        """Atomically persist one accepted trigger or return its duplicate."""
 
     def history(self, *, entity_type: str, entity_id: str) -> list[HistoryRecord]:
-        """Return committed transition records in their append-only order."""
+        """Return committed trigger records in their append-only order."""
 
 
 class Execution(Protocol):
     """Awaited execution boundary, independent from persistence."""
 
     async def run(self, callback: Callable[..., object], **inputs: object) -> object:
-        """Run transition code and await its configured local result."""
+        """Run trigger code and await its configured local result."""
