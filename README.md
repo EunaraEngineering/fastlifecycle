@@ -1,6 +1,14 @@
-# FastLifecycle
+<p align="center">
+  <img
+    src="docs/assets/fastlifecycle-logo-v1.png"
+    alt="FastLifecycle logo: two snakes circle a versioned entity through lifecycle states"
+    width="240"
+  >
+</p>
 
-> **Entity-centric durable lifecycles for Python.**
+<h1 align="center">FastLifecycle</h1>
+
+<p align="center"><strong>Entity-centric durable lifecycles for Python.</strong></p>
 
 FastLifecycle is an open-source framework for building durable,
 entity-centric business lifecycles in Python. It models business entities as
