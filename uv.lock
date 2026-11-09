@@ -238,6 +238,7 @@ dev = [
 ]
 
 [package.metadata]
+provides-extras = ["sqlite", "local"]
 
 [package.metadata.requires-dev]
 dev = [
