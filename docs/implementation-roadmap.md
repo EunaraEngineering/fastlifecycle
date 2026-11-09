@@ -9,7 +9,7 @@ capabilities or a stable public API contract.
 ## Current implementation status
 
 Stage 1's SQLite/local MVP is implemented in this repository. The supported
-surface is the typed entity and transition kernel, `SQLiteStorage` with the
+surface is the typed entity and trigger kernel, `SQLiteStorage` with the
 explicit `migrate()` step, `LocalExecution`, optimistic entity versions,
 append-only history, command idempotency, and the opt-in SQLite/local
 environment loader. Its guarantees and limits are documented in the README and
@@ -19,6 +19,28 @@ Stages 2 through 4 remain planned work. In particular, this implementation
 does not include PostgreSQL, a worker fleet, pending jobs, retries, leases,
 outbox publication, crash recovery of jobs, or durable external-effect
 delivery.
+
+## Trigger-driven lifecycle decision
+
+The public, registrable contract is a trigger, not a predeclared edge in a
+state graph. A trigger declares its typed input, optional accepted source
+states, and guards. Its handler resolves one explicit decision:
+
+- `transition_to(target, outcome=...)` accepts the trigger and changes state.
+- `stay(outcome=...)` accepts the trigger without changing state.
+
+The resolved state change is an internal audit fact, not the public operation.
+One trigger may therefore yield different outcomes and target states according
+to its domain logic. Invalid input, an unsupported source state, a failed
+guard, a failed invariant, or a malformed decision rejects the trigger and
+persists no accepted record. An accepted `stay` is persisted, idempotent, and
+increments the entity version because it may update entity fields.
+
+For every accepted trigger, persistence records its name, input, outcome,
+source state, target state, whether the state changed, handler result, and
+entity version in the same transaction. The idempotency scope is `(entity
+type, entity ID, key)`; the same trigger and input returns the canonical result
+while reuse for another trigger or input is rejected.
 
 The primary abstraction remains an entity and its lifecycle. A transition may
 derive jobs, but an entity lifecycle and the job graph for one transition are
