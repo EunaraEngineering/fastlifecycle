@@ -1,4 +1,4 @@
-"""Use case for locally awaited lifecycle transitions."""
+"""Use case for locally awaited trigger dispatch."""
 
 from __future__ import annotations
 
@@ -7,129 +7,136 @@ from typing import TypeVar
 
 from fastlifecycle.domain.entity import (
     Entity,
-    Transition,
+    Trigger,
+    TriggerDecision,
     validate_guards,
     validate_invariants,
 )
-from fastlifecycle.domain.errors import InvalidStateError, TransitionInputError
+from fastlifecycle.domain.errors import (
+    ConcurrentTriggerError,
+    InvalidStateError,
+    InvalidTriggerDecisionError,
+    TriggerInputError,
+)
 
-from .models import ExecutionResult, HistoryRecord, StoredEntity, entity_from_snapshot
+from .models import (
+    DispatchResult,
+    HistoryRecord,
+    StoredCommand,
+    StoredEntity,
+    entity_from_snapshot,
+)
 from .ports import Execution, Storage
 
 EntityType = TypeVar("EntityType", bound=Entity)
 
 
 class FastLifecycle:
-    """Execute entity transitions against an explicitly supplied storage backend.
-
-    Transition code runs in the caller's awaited context before the short SQLite
-    commit transaction.  It therefore must not assume that external effects are
-    part of the database transaction.
-    """
+    """Dispatch public triggers against explicitly supplied backend instances."""
 
     def __init__(self, storage: Storage, execution: Execution | None = None) -> None:
         self._storage = storage
         self._execution = execution or _InlineExecution()
 
-    async def execute(
+    async def dispatch(
         self,
-        transition: Transition,
+        trigger: Trigger,
         *,
         entity_id: str,
         idempotency_key: str | None = None,
         expected_version: int | None = None,
         **inputs: object,
-    ) -> ExecutionResult:
-        """Await a transition and atomically persist a successful command.
-
-        A key is scoped to ``(entity type, entity id)``. Reusing it with a
-        different transition or inputs is rejected; reusing it for the same
-        command returns the originally stored result with ``duplicate=True``.
-        """
-        if not isinstance(transition, Transition) or transition.owner is None:
-            raise TransitionInputError(
-                "Pass a transition declared with @transition, for example "
-                "Order.confirm_payment."
+    ) -> DispatchResult:
+        """Await and atomically persist an accepted trigger decision."""
+        if not isinstance(trigger, Trigger) or trigger.owner is None:
+            raise TriggerInputError(
+                "Pass a trigger declared with @trigger, for example "
+                "Order.receive_message."
             )
         if not entity_id:
-            raise TransitionInputError("entity_id must be a non-empty string.")
+            raise TriggerInputError("entity_id must be a non-empty string.")
         if idempotency_key == "":
-            raise TransitionInputError(
-                "idempotency_key must be non-empty when supplied."
-            )
-        transition.validate_arguments(dict(inputs))
+            raise TriggerInputError("idempotency_key must be non-empty when supplied.")
+        trigger.validate_arguments(dict(inputs))
         self._storage.check_compatible()
 
-        entity_type = transition.owner
+        entity_type = trigger.owner
         type_name = _entity_type_name(entity_type)
         duplicate = self._storage.find_command(
             entity_type=type_name,
             entity_id=entity_id,
             idempotency_key=idempotency_key,
-            transition=transition.name,
+            trigger=trigger.name,
             inputs=dict(inputs),
         )
         if duplicate is not None:
-            return ExecutionResult(
-                entity_id=duplicate.entity_id,
-                entity_type=duplicate.entity_type,
-                transition=duplicate.transition,
-                version=duplicate.version,
-                result=duplicate.result,
-                duplicate=True,
-            )
+            return _dispatch_result(duplicate)
         snapshot = self._storage.load(entity_type=type_name, entity_id=entity_id)
-        entity, current_version = self._entity_for_execution(
+        entity, current_version = self._entity_for_dispatch(
             entity_type, entity_id, snapshot
         )
-        actual_version = current_version
         required_version = (
-            actual_version if expected_version is None else expected_version
+            current_version if expected_version is None else expected_version
         )
-        if required_version != actual_version:
-            from fastlifecycle.domain.errors import ConcurrentTransitionError
-
-            raise ConcurrentTransitionError(
+        if required_version != current_version:
+            raise ConcurrentTriggerError(
                 entity_type=type_name,
                 entity_id=entity_id,
                 expected=required_version,
-                actual=actual_version,
+                actual=current_version,
             )
-        state = getattr(entity, "state", None)
-        if state not in transition.sources:
+        source_state = entity.__dict__["state"]
+        if trigger.sources and source_state not in trigger.sources:
             raise InvalidStateError(
                 entity_type=type_name,
                 entity_id=entity_id,
-                transition=transition.name,
-                expected=transition.sources,
-                actual=state,
+                trigger=trigger.name,
+                expected=trigger.sources,
+                actual=source_state,
             )
-        await validate_guards(entity, transition)
-        method = transition.function.__get__(entity, entity_type)
-        result = await self._execution.run(method, **inputs)
-        entity.__dict__["state"] = transition.target
-        await validate_invariants(entity, transition)
+        await validate_guards(entity, trigger)
+        method = trigger.function.__get__(entity, entity_type)
+        decision = await self._execution.run(method, **inputs)
+        if not isinstance(decision, TriggerDecision):
+            raise InvalidTriggerDecisionError(
+                f"Trigger {trigger.name!r} must return stay(...) or transition_to(...)."
+            )
+        if not decision.outcome:
+            raise InvalidTriggerDecisionError(
+                f"Trigger {trigger.name!r} must provide a non-empty outcome."
+            )
+        if entity.__dict__["state"] != source_state:
+            raise InvalidTriggerDecisionError(
+                f"Trigger {trigger.name!r} modified state directly; return "
+                "transition_to(...) instead."
+            )
+        target_state = (
+            source_state if decision.target_state is None else decision.target_state
+        )
+        if not isinstance(target_state, type(source_state)):
+            raise InvalidTriggerDecisionError(
+                f"Trigger {trigger.name!r} chose state {target_state!r}, which does "
+                f"not match {type(source_state).__name__}."
+            )
+        state_changed = target_state != source_state
+        entity.__dict__["state"] = target_state
+        await validate_invariants(entity, trigger)
 
         stored = self._storage.commit(
             entity_type=type_name,
             entity_id=entity_id,
-            transition=transition.name,
+            trigger=trigger.name,
+            outcome=decision.outcome,
+            source_state=source_state,
+            target_state=target_state,
+            state_changed=state_changed,
             expected_version=required_version,
-            source_state=state,
-            target_state=transition.target,
             entity_values=entity._persistent_values(),
             inputs=dict(inputs),
-            result=result,
+            result=decision.result,
             idempotency_key=idempotency_key,
         )
-        return ExecutionResult(
-            entity_id=stored.entity_id,
-            entity_type=stored.entity_type,
-            transition=stored.transition,
-            version=stored.version,
-            result=stored.result,
-            duplicate=stored.duplicate,
-        )
+        return _dispatch_result(stored)
 
     def get(
         self, entity_type: type[EntityType], entity_id: str
@@ -144,14 +151,14 @@ class FastLifecycle:
         return entity_from_snapshot(entity_type, snapshot), snapshot.version
 
     def history(self, entity_type: type[Entity], entity_id: str) -> list[HistoryRecord]:
-        """Read ordinary append-only lifecycle history."""
+        """Read ordinary append-only trigger history."""
         self._storage.check_compatible()
         return self._storage.history(
             entity_type=_entity_type_name(entity_type), entity_id=entity_id
         )
 
     @staticmethod
-    def _entity_for_execution(
+    def _entity_for_dispatch(
         entity_type: type[EntityType], entity_id: str, snapshot: StoredEntity | None
     ) -> tuple[EntityType, int]:
         if snapshot is None:
@@ -159,6 +166,21 @@ class FastLifecycle:
             entity._entity_id = entity_id
             return entity, 0
         return entity_from_snapshot(entity_type, snapshot), snapshot.version
+
+
+def _dispatch_result(stored: StoredCommand) -> DispatchResult:
+    return DispatchResult(
+        entity_id=stored.entity_id,
+        entity_type=stored.entity_type,
+        trigger=stored.trigger,
+        outcome=stored.outcome,
+        source_state=stored.source_state,
+        target_state=stored.target_state,
+        state_changed=stored.state_changed,
+        version=stored.version,
+        result=stored.result,
+        duplicate=stored.duplicate,
+    )
 
 
 def _entity_type_name(entity_type: type[Entity]) -> str:

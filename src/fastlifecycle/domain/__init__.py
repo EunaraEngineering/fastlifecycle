@@ -1,34 +1,47 @@
 """Lifecycle domain primitives with no persistence dependencies."""
 
-from .entity import Entity, Transition, invariant, transition
+from .entity import (
+    Entity,
+    Trigger,
+    TriggerDecision,
+    invariant,
+    stay,
+    transition_to,
+    trigger,
+)
 from .errors import (
-    ConcurrentTransitionError,
+    ConcurrentTriggerError,
     ConfigurationError,
     FastLifecycleError,
     GuardRejectedError,
     IdempotencyConflictError,
     InvalidStateError,
+    InvalidTriggerDecisionError,
     InvariantError,
     SchemaNotReadyError,
-    TransitionError,
-    TransitionInputError,
+    TriggerError,
+    TriggerInputError,
     UnsupportedSchemaError,
 )
 
 __all__ = (
-    "ConcurrentTransitionError",
+    "ConcurrentTriggerError",
     "ConfigurationError",
     "Entity",
     "FastLifecycleError",
     "GuardRejectedError",
     "IdempotencyConflictError",
     "InvalidStateError",
+    "InvalidTriggerDecisionError",
     "InvariantError",
     "SchemaNotReadyError",
-    "Transition",
-    "TransitionError",
-    "TransitionInputError",
+    "Trigger",
+    "TriggerDecision",
+    "TriggerError",
+    "TriggerInputError",
     "UnsupportedSchemaError",
     "invariant",
-    "transition",
+    "stay",
+    "transition_to",
+    "trigger",
 )

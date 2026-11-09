@@ -1,6 +1,6 @@
 """Application services and backend contracts."""
 
-from .models import ExecutionResult, HistoryRecord
+from .models import DispatchResult, HistoryRecord
 from .service import FastLifecycle
 
-__all__ = ("ExecutionResult", "FastLifecycle", "HistoryRecord")
+__all__ = ("DispatchResult", "FastLifecycle", "HistoryRecord")

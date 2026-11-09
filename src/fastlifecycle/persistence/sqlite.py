@@ -12,13 +12,13 @@ from typing import Any
 
 from fastlifecycle.application.models import HistoryRecord, StoredCommand, StoredEntity
 from fastlifecycle.domain.errors import (
-    ConcurrentTransitionError,
+    ConcurrentTriggerError,
     IdempotencyConflictError,
     SchemaNotReadyError,
     UnsupportedSchemaError,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _json_default(value: object) -> object:
@@ -122,6 +122,9 @@ class SQLiteStorage:
                     )
                 if version < 1:
                     self._apply_v1(connection)
+                    version = 1
+                if version < 2:
+                    self._apply_v2(connection)
                     connection.execute("DELETE FROM fastlifecycle_schema_version")
                     connection.execute(
                         "INSERT INTO fastlifecycle_schema_version(version) VALUES (?)",
@@ -161,6 +164,49 @@ class SQLiteStorage:
             "inputs_json TEXT NOT NULL, result_json TEXT NOT NULL, "
             "version INTEGER NOT NULL, created_at TEXT NOT NULL, "
             "PRIMARY KEY(entity_type, entity_id, idempotency_key))"
+        )
+
+    @staticmethod
+    def _apply_v2(connection: sqlite3.Connection) -> None:
+        """Upgrade v1 transition records into trigger records without data loss."""
+        connection.execute(
+            "ALTER TABLE fastlifecycle_history ADD COLUMN trigger_name TEXT"
+        )
+        connection.execute("ALTER TABLE fastlifecycle_history ADD COLUMN outcome TEXT")
+        connection.execute(
+            "ALTER TABLE fastlifecycle_history ADD COLUMN state_changed INTEGER "
+            "NOT NULL DEFAULT 1"
+        )
+        connection.execute(
+            "UPDATE fastlifecycle_history SET trigger_name = transition_name, "
+            "outcome = 'transition'"
+        )
+        connection.execute(
+            "ALTER TABLE fastlifecycle_commands ADD COLUMN trigger_name TEXT"
+        )
+        connection.execute("ALTER TABLE fastlifecycle_commands ADD COLUMN outcome TEXT")
+        connection.execute(
+            "ALTER TABLE fastlifecycle_commands ADD COLUMN source_state_json TEXT"
+        )
+        connection.execute(
+            "ALTER TABLE fastlifecycle_commands ADD COLUMN target_state_json TEXT"
+        )
+        connection.execute(
+            "ALTER TABLE fastlifecycle_commands ADD COLUMN state_changed INTEGER"
+        )
+        connection.execute(
+            "UPDATE fastlifecycle_commands SET trigger_name = transition_name, "
+            "outcome = 'transition', source_state_json = ("
+            "SELECT source_state_json FROM fastlifecycle_history history "
+            "WHERE history.entity_type = fastlifecycle_commands.entity_type "
+            "AND history.entity_id = fastlifecycle_commands.entity_id "
+            "AND history.transition_name = fastlifecycle_commands.transition_name "
+            "AND history.version = fastlifecycle_commands.version), "
+            "target_state_json = (SELECT target_state_json FROM fastlifecycle_history "
+            "history WHERE history.entity_type = fastlifecycle_commands.entity_type "
+            "AND history.entity_id = fastlifecycle_commands.entity_id "
+            "AND history.transition_name = fastlifecycle_commands.transition_name "
+            "AND history.version = fastlifecycle_commands.version), state_changed = 1"
         )
 
     def check_compatible(self) -> None:
@@ -219,10 +265,10 @@ class SQLiteStorage:
         entity_type: str,
         entity_id: str,
         idempotency_key: str | None,
-        transition: str,
+        trigger: str,
         inputs: dict[str, Any],
     ) -> StoredCommand | None:
-        """Return an existing equivalent command before user code is invoked."""
+        """Return an existing equivalent command before trigger code is invoked."""
         inputs_json = _encode(inputs)
         with self._connect() as connection:
             return self._existing_command(
@@ -230,7 +276,7 @@ class SQLiteStorage:
                 entity_type=entity_type,
                 entity_id=entity_id,
                 idempotency_key=idempotency_key,
-                transition=transition,
+                trigger=trigger,
                 inputs_json=inputs_json,
             )
 
@@ -239,16 +285,18 @@ class SQLiteStorage:
         *,
         entity_type: str,
         entity_id: str,
-        transition: str,
-        expected_version: int,
+        trigger: str,
+        outcome: str,
         source_state: Any,
         target_state: Any,
+        state_changed: bool,
+        expected_version: int,
         entity_values: dict[str, Any],
         inputs: dict[str, Any],
         result: Any,
         idempotency_key: str | None,
     ) -> StoredCommand:
-        """Atomically store state, audit history, and a successful command record."""
+        """Atomically store state, audit history, and a successful trigger record."""
         inputs_json = _encode(inputs)
         result_json = _encode(result)
         values_json = _encode(entity_values)
@@ -263,7 +311,7 @@ class SQLiteStorage:
                     entity_type=entity_type,
                     entity_id=entity_id,
                     idempotency_key=idempotency_key,
-                    transition=transition,
+                    trigger=trigger,
                     inputs_json=inputs_json,
                 )
                 if duplicate is not None:
@@ -276,7 +324,7 @@ class SQLiteStorage:
                 ).fetchone()
                 actual_version = 0 if row is None else int(row["version"])
                 if actual_version != expected_version:
-                    raise ConcurrentTransitionError(
+                    raise ConcurrentTriggerError(
                         entity_type=entity_type,
                         entity_id=entity_id,
                         expected=expected_version,
@@ -316,16 +364,20 @@ class SQLiteStorage:
                     )
                 connection.execute(
                     "INSERT INTO fastlifecycle_history("
-                    "entity_type, entity_id, transition_name, source_state_json, "
-                    "target_state_json, version, inputs_json, result_json, "
+                    "entity_type, entity_id, transition_name, trigger_name, outcome, "
+                    "source_state_json, target_state_json, state_changed, "
+                    "version, inputs_json, result_json, "
                     "occurred_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         entity_type,
                         entity_id,
-                        transition,
+                        trigger,
+                        trigger,
+                        outcome,
                         source_json,
                         target_json,
+                        int(state_changed),
                         version,
                         inputs_json,
                         result_json,
@@ -336,13 +388,20 @@ class SQLiteStorage:
                     connection.execute(
                         "INSERT INTO fastlifecycle_commands("
                         "entity_type, entity_id, idempotency_key, transition_name, "
-                        "inputs_json, result_json, version, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "trigger_name, "
+                        "outcome, source_state_json, target_state_json, "
+                        "state_changed, inputs_json, result_json, version, "
+                        "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             entity_type,
                             entity_id,
                             idempotency_key,
-                            transition,
+                            trigger,
+                            trigger,
+                            outcome,
+                            source_json,
+                            target_json,
+                            int(state_changed),
                             inputs_json,
                             result_json,
                             version,
@@ -353,7 +412,11 @@ class SQLiteStorage:
                 return StoredCommand(
                     entity_id=entity_id,
                     entity_type=entity_type,
-                    transition=transition,
+                    trigger=trigger,
+                    outcome=outcome,
+                    source_state=source_state,
+                    target_state=target_state,
+                    state_changed=state_changed,
                     version=version,
                     result=result,
                     duplicate=False,
@@ -369,28 +432,33 @@ class SQLiteStorage:
         entity_type: str,
         entity_id: str,
         idempotency_key: str | None,
-        transition: str,
+        trigger: str,
         inputs_json: str,
     ) -> StoredCommand | None:
         if idempotency_key is None:
             return None
         row = connection.execute(
-            "SELECT transition_name, inputs_json, result_json, version "
+            "SELECT trigger_name, outcome, source_state_json, target_state_json, "
+            "state_changed, inputs_json, result_json, version "
             "FROM fastlifecycle_commands WHERE entity_type = ? AND entity_id = ? "
             "AND idempotency_key = ?",
             (entity_type, entity_id, idempotency_key),
         ).fetchone()
         if row is None:
             return None
-        if row["transition_name"] != transition or row["inputs_json"] != inputs_json:
+        if row["trigger_name"] != trigger or row["inputs_json"] != inputs_json:
             raise IdempotencyConflictError(
                 f"Idempotency key {idempotency_key!r} for {entity_type} {entity_id!r} "
-                "was already used for a different command."
+                "was already used for a different trigger."
             )
         return StoredCommand(
             entity_id=entity_id,
             entity_type=entity_type,
-            transition=transition,
+            trigger=trigger,
+            outcome=str(row["outcome"]),
+            source_state=_decode(str(row["source_state_json"])),
+            target_state=_decode(str(row["target_state_json"])),
+            state_changed=bool(row["state_changed"]),
             version=int(row["version"]),
             result=_decode(str(row["result_json"])),
             duplicate=True,
@@ -399,8 +467,8 @@ class SQLiteStorage:
     def history(self, *, entity_type: str, entity_id: str) -> list[HistoryRecord]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT id, transition_name, source_state_json, target_state_json, "
-                "version, "
+                "SELECT id, trigger_name, outcome, source_state_json, "
+                "target_state_json, state_changed, version, "
                 "inputs_json, result_json, occurred_at FROM fastlifecycle_history "
                 "WHERE entity_type = ? AND entity_id = ? ORDER BY id",
                 (entity_type, entity_id),
@@ -410,9 +478,11 @@ class SQLiteStorage:
                 id=int(row["id"]),
                 entity_id=entity_id,
                 entity_type=entity_type,
-                transition=str(row["transition_name"]),
+                trigger=str(row["trigger_name"]),
+                outcome=str(row["outcome"]),
                 source_state=_decode(str(row["source_state_json"])),
                 target_state=_decode(str(row["target_state_json"])),
+                state_changed=bool(row["state_changed"]),
                 version=int(row["version"]),
                 inputs=_decode(str(row["inputs_json"])),
                 result=_decode(str(row["result_json"])),
